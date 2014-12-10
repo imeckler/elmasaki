@@ -3,7 +3,6 @@ module Main where
 import Queue (..)
 import Graphics.Input.Field
 import Graphics.Input (..)
-import Debug
 
 pushes : Input ()
 pushes = input ()
@@ -18,7 +17,6 @@ buttons = flow right [button pushes.handle () "Push", button pops.handle () "Pop
 queueSignal =
   merge (lift (\_ -> Put 1) pushes.signal) (lift (\_ -> Pop) pops.signal)
   |> interp ([], [])
-  |> lift (Debug.watch "queue")
 
 drawing : Signal Element
 drawing =

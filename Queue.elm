@@ -1,34 +1,24 @@
 module Queue where
 
+-- This module implements functional Queues as described in Okasaki 1996
+-- (http://www.cs.cmu.edu/~rwh/theses/okasaki.pdf) along with types
+-- reifying operations on those queues.
+
 import Sequence (..)
 import Regex (..)
 import Maybe
 import String (toInt)
-import Debug
 
+-- In our quest to achieve good performance, we represent queues as a pair
+-- of lists: the first representing the front of the queue, and the second
+-- representing the back (in reverse order). The point is that it's easy to
+-- perform both of the essential queue operations.
+-- 1. Popping an element off the front of the queue (assuming it's non-empty)
+--    is as easy as taking the head of the first list in the pair.
+-- 2. Pushing an element onto the back of the queue is just consing onto the
+--    second list in the pair, since we're representing the back of the queue
+--    in reverse.
 type Queue a = ([a], [a])
-
-data QueueInstr a
-  = Put a
-  | Pop
-
-data QueueOp a
-  = PutRight a
-  | PopLeft a
-  | RightToLeft a
-  | EmptyError
-  | Nop
-
-parseInstr : String -> Maybe (QueueInstr Int)
-parseInstr =
-  let re = regex "push\\((\\d+)\\)|pop" in
-  \s ->
-    case find All re s of
-      []   -> Nothing
-      m :: _ -> 
-        case m.submatches of
-          [Nothing]     -> Just Pop
-          (Just x :: _) -> Maybe.map Put (toInt x)
 
 put : a -> Queue a -> Queue a
 put x (xs, ys) = (xs, x::ys)
@@ -39,6 +29,54 @@ pop q =
     ([], [])    -> Nothing
     ([], ys)    -> pop (reverse ys, [])
     (x::xs, ys) -> Just (x, (xs, ys))
+
+-- If the front view of the queue is empty when we try to pop, we reverse the back
+-- and try to pop from there. Reversing takes time O(n) where n is the length of
+-- the back view, but we won't have to do it again for another n steps, so it has
+-- an amortized cost of O(1).
+
+-- Now let's make an animation of such a queue. Recall the notion of a `Signal`.
+-- Conceptually, a `Signal a` can be thought of as function `Time -> a`. For example,
+-- the user's mouse position can be represented as a pair `(Int, Int)` which is a function
+-- of `Time`, and indeed there is a value in elm `Mouse.position : Signal (Int, Int)`.
+-- As another example, the type of graphics in Elm is called `Form`, so an animation would
+-- have type `Signal Form`.
+
+-- Back to animating queues. First we must have a little dialogue with ourselves:
+-- Q: What is it that we want to animate?
+-- A: We want to animate the push and pop commands being performed on the above queue data.
+-- Q: Where will the commands for the queue come from?
+-- A: They will come from the user.
+-- Q: How do we represent this input from the user.
+-- A: We make a type reifying the possible commands the user can make
+
+data QueueCommand a
+  = Put a
+  | Pop
+
+-- and then we build a signal of type `Signal (QueueCommand a)`, which represents the stream
+-- of queue commands. This signal is actually defined in the Main module, so we'll shelve
+-- discussion of getting the input for later. For now, let's just suppose we have such a signal.
+
+-- The `QueueCommand`s themselves aren't directly animatable. The `Pop` command in particular
+-- could have many different animations associated to it depending on the state of the queue:
+-- Sometimes it just pops an element off the left list, sometimes it causes the right list
+-- to be reversed and shuffled over to the left list. These two things should of course be
+-- animated differently.
+
+-- So, with that in mind, we define the following type, which more directly represents the
+-- exact operations being performed on a queue.
+
+data QueueOp a
+  = PutRight a
+  | PopLeft a
+  | RightToLeft a
+  | EmptyError
+  | Nop
+
+-- The idea now will be to somehow interpret our `Signal (QueueCommand a)` into
+-- a `Signal (QueueOp a, Queue a)` (or something along those lines)
+-- which can be more easily animated.
 
 rightToLeft : Queue a -> [(QueueOp a, Queue a)]
 rightToLeft q =
@@ -56,15 +94,15 @@ execPop q =
 execPut : a -> Queue a -> [(QueueOp a, Queue a)]
 execPut x (xs, ys) = [(PutRight x, (xs, x::ys))]
 
--- Right queue is the queue before the operation
-interp : Queue a -> Signal (QueueInstr a) -> Signal ([(QueueOp a, Queue a)], Queue a)
-interp q0 instrSig =
-  let exec instr (ss, _) = let q = snd (last ss) in
-    case instr of
+-- Right queue in the output is the queue before the operation
+interp : Queue a -> Signal (QueueCommand a) -> Signal ([(QueueOp a, Queue a)], Queue a)
+interp q0 commandSig =
+  let exec command (ss, _) = let q = snd (last ss) in
+    case command of
       Put x -> (execPut x q, q)
       Pop   -> (execPop q, q)
   in
-  foldp exec ([(Nop, q0)], q0) instrSig
+  foldp exec ([(Nop, q0)], q0) commandSig
 
 type Point = { x : Float, y : Float }
 
@@ -77,6 +115,7 @@ type StackGraphic a = [a]
 
 type BlockGraphic a = { pos : Point, block : a }
 
+-- Graphics code.
 blockSideLength : Float
 blockSideLength = 100
 
@@ -123,7 +162,7 @@ newBlockPos stackHeight =
 -- Duration: 2 seconds
 putRightAnim : a -> Queue a -> Seq (QueueGraphic a)
 putRightAnim x q =
-  let blockPos = Debug.watch "rightpos" << newBlockPos (length (snd q))
+  let blockPos = newBlockPos (length (snd q))
   in for blockFallTime (\t -> {stacks = q, looseBlock = Just {pos = blockPos t, block = x}})
 
 -- The arg should be the queue after the pop
@@ -142,7 +181,7 @@ popLeftAnim x q =
 -- Duration: 2 seconds
 rightToLeftAnim : a -> Queue a -> Seq (QueueGraphic a)
 rightToLeftAnim x (l, r) =
-  let (n_l, n_r) = Debug.watch "lens" (length l, length r)
+  let (n_l, n_r) = (length l, length r)
       (h_l, h_r) = (blocksHeight n_l, blocksHeight n_r)
       blockPos   = runSeq (
         if n_l > n_r
@@ -168,15 +207,18 @@ animate =
 
 draw : Signal (Seq (QueueGraphic a)) -> Signal Form
 draw s =
-  lift2 (\(t0, seq) t -> let d = Debug.watch "diff" (t - t0) in queueForm <| runSeq seq d) (timestamp s) (every (30 * millisecond))
+  lift2 (\(t0, seq) t -> queueForm <| runSeq seq (t - t0)) (timestamp s) (every (30 * millisecond))
 
-{-
-Signal (Float -> QueueGraphic a)
-  zipWith ticks to get
-  Signal (QueueGraphic a)
-    map draw to get
-      Signal Picture
--}
 
--- draw : Signal 
+-- TODO: Currently unused
+parseCommand : String -> Maybe (QueueCommand Int)
+parseCommand =
+  let re = regex "push\\((\\d+)\\)|pop" in
+  \s ->
+    case find All re s of
+      []   -> Nothing
+      m :: _ -> 
+        case m.submatches of
+          [Nothing]     -> Just Pop
+          (Just x :: _) -> Maybe.map Put (toInt x)
 
