@@ -1,27 +1,28 @@
-module Sequence where
+module PSignal where
 
 import QUtils
 
 data Duration = Finite Time | Forever
 
-type Seq a = (Duration, Time -> a)
+-- The P is for Pure and Partial.
+type PSignal a = (Duration, Time -> a)
 
-forever : (Time -> a) -> Seq a
+forever : (Time -> a) -> PSignal a
 forever f = (Forever, f)
 
-for : Time -> (Time -> a) -> Seq a
+for : Time -> (Time -> a) -> PSignal a
 for dur f = (Finite dur, f)
 
-stayFor : Time -> a -> Seq a
+stayFor : Time -> a -> PSignal a
 stayFor dur x = for dur (\_ -> x)
 
-stayForever : a -> Seq a
+stayForever : a -> PSignal a
 stayForever x = forever (\_ -> x)
 
-jumpTo : a -> Seq a
+jumpTo : a -> PSignal a
 jumpTo x = stayFor 0 x
 
-cycle : Seq a -> Seq a
+cycle : PSignal a -> PSignal a
 cycle (dur, f) =
   case dur of
     Forever  -> (Forever, f)
@@ -30,19 +31,19 @@ cycle (dur, f) =
 mkF d1 f1 f2 =
   \t -> if t <= d1 then f1 t else f2 (t - d1)
 
-(>>>) : Seq a -> Seq a -> Seq a
+(>>>) : PSignal a -> PSignal a -> PSignal a
 (>>>) (dur1, f1) (dur2, f2) =
   case (dur1, dur2) of
     (Forever, _)           -> (Forever, f1)
     (Finite d1, Forever)   -> (Forever, mkF d1 f1 f2)
     (Finite d1, Finite d2) -> (Finite (d1 + d2), mkF d1 f1 f2)
 
-concatSeq : [Seq a] -> Seq a
-concatSeq = foldr1 (>>>)
+concatPSignal : [PSignal a] -> PSignal a
+concatPSignal = foldr1 (>>>)
 
-runSeq : Seq a -> Time -> a
-runSeq (_, f) = f
+runPSignal : PSignal a -> Time -> a
+runPSignal (_, f) = f
 
-mapSeq : (a -> b) -> Seq a -> Seq b
-mapSeq g (dur, f) = (dur, g << f)
+mapPSignal : (a -> b) -> PSignal a -> PSignal b
+mapPSignal g (dur, f) = (dur, g << f)
 

@@ -4,7 +4,7 @@ module Queue where
 -- (http://www.cs.cmu.edu/~rwh/theses/okasaki.pdf) along with types
 -- reifying operations on those queues.
 
-import Sequence (..)
+import PSignal (..)
 import Regex (..)
 import Maybe
 import String (toInt)
@@ -141,8 +141,6 @@ queueForm { stacks, looseBlock } =
   in
   group <| [stackForm l, moveX stackShift (stackForm r)] ++ bform
 
--- queueOpAnim : (QueueOp a, Queue a) -> Seq (QueueGraphic a)
-
 blockFallTime = 700 * millisecond
 
 linearly : Time -> Float -> Float -> (Time -> Float)
@@ -160,14 +158,14 @@ newBlockPos stackHeight =
 
 -- The arg should be the queue before the put
 -- Duration: 2 seconds
-putRightAnim : a -> Queue a -> Seq (QueueGraphic a)
+putRightAnim : a -> Queue a -> PSignal (QueueGraphic a)
 putRightAnim x q =
   let blockPos = newBlockPos (length (snd q))
   in for blockFallTime (\t -> {stacks = q, looseBlock = Just {pos = blockPos t, block = x}})
 
 -- The arg should be the queue after the pop
 -- Duration: 2 seconds
-popLeftAnim : a -> Queue a -> Seq (QueueGraphic a)
+popLeftAnim : a -> Queue a -> PSignal (QueueGraphic a)
 popLeftAnim x q =
   let blockFlyTime = 700 * millisecond
       blockY = blocksHeight (length (fst q))
@@ -179,11 +177,11 @@ popLeftAnim x q =
 -- as it should. I.e., exec and make the animation at the same time.
 -- The arg should be the queue with the moving block on neither half.
 -- Duration: 2 seconds
-rightToLeftAnim : a -> Queue a -> Seq (QueueGraphic a)
+rightToLeftAnim : a -> Queue a -> PSignal (QueueGraphic a)
 rightToLeftAnim x (l, r) =
   let (n_l, n_r) = (length l, length r)
       (h_l, h_r) = (blocksHeight n_l, blocksHeight n_r)
-      blockPos   = runSeq (
+      blockPos   = runPSignal (
         if n_l > n_r
         then upBlockPos h_r h_l stackShift >>> leftBlockPos stackShift 0 h_l
         else leftBlockPos stackShift h_l h_r >>> upBlockPos h_r h_l 0)
@@ -193,9 +191,9 @@ rightToLeftAnim x (l, r) =
 upBlockPos   y0 yFinal x = for (0.5 * second) <| (\y -> {x=x, y=y}) << linearly (0.5 * second) y0 yFinal
 leftBlockPos x0 xFinal y = for (0.5 * second) <| (\x -> {x=x, y=y}) << linearly (0.5 * second) x0 xFinal
 
-animate : Signal ([(QueueOp a, Queue a)], Queue a) -> Signal (Seq (QueueGraphic a))
+animate : Signal ([(QueueOp a, Queue a)], Queue a) -> Signal (PSignal (QueueGraphic a))
 animate =
-  let toSeq q (op, q') =
+  let toPSignal q (op, q') =
     case op of
       PutRight x    -> putRightAnim x q
       PopLeft x     -> popLeftAnim x q'
@@ -203,12 +201,11 @@ animate =
       Nop           -> forever (\_ -> { stacks = q', looseBlock = Nothing })
       EmptyError    -> forever (\_ -> { stacks = q', looseBlock = Nothing })
   in
-  lift (\(ops, q) -> concatSeq (map (toSeq q) ops))
+  lift (\(ops, q) -> concatPSignal (map (toPSignal q) ops))
 
-draw : Signal (Seq (QueueGraphic a)) -> Signal Form
+draw : Signal (PSignal (QueueGraphic a)) -> Signal Form
 draw s =
-  lift2 (\(t0, seq) t -> queueForm <| runSeq seq (t - t0)) (timestamp s) (every (30 * millisecond))
-
+  lift2 (\(t0, psig) t -> queueForm <| runPSignal psig (t - t0)) (timestamp s) (every (30 * millisecond))
 
 -- TODO: Currently unused
 parseCommand : String -> Maybe (QueueCommand Int)
