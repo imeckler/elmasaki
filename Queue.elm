@@ -1,9 +1,10 @@
-module Queue where
+-- module Queue where
 
 -- This module implements functional Queues as described in Okasaki 1996
 -- (http://www.cs.cmu.edu/~rwh/theses/okasaki.pdf) along with types
 -- reifying operations on those queues.
 
+import Debug
 import Easing(..)
 import Time (second)
 import Time
@@ -12,6 +13,7 @@ import Stage(Stage, ForATime, Forever)
 import Stage.Infix(..)
 import Maybe
 import List
+import List((::))
 import Color(..)
 import Graphics.Collage(..)
 import Graphics.Element(..)
@@ -97,8 +99,8 @@ stepPopping : PoppingState a -> OrDone a (PoppingState a)
 stepPopping ps = case ps of
   PoppingLeft x q             -> Done q
   RightToLeft x (front, back) -> case back of
-    []        -> Done (x :: front, back)
-    y::front' -> StillGoing (RightToLeft y (x :: front', back))
+    []       -> StillGoing (PoppingLeft x (front, back))
+    y::back' -> StillGoing (RightToLeft y (x :: front, back'))
 
 stepPutting : PuttingState a -> OrDone a (PuttingState a)
 stepPutting (PuttingRight x (front, back)) = Done (front, x :: back)
@@ -106,14 +108,14 @@ stepPutting (PuttingRight x (front, back)) = Done (front, x :: back)
 record : (s -> OrDone a s) -> s -> (List s, Queue a)
 record step s = case step s of
   Done q        -> ([s], q)
-  StillGoing s' -> let (ss, q) = record step s' in (s' :: ss, q)
+  StillGoing s' -> let (ss, q) = record step s' in (s :: ss, q)
 
 animatedSteps
   :  (s -> OrDone a s)
   -> (s -> Stage ForATime Form)
   -> (s -> (Stage Forever Form, Queue a))
 animatedSteps step drawStep s =
-  let (ss, q) = record step s in
+  let (ss, q) = Debug.watch "record" <| record step s in
   ( List.foldr1 (<>) (List.map drawStep ss) <> Stage.stayForever (drawQueue q)
   , q)
 
@@ -128,14 +130,20 @@ interpretCommand qc q = case (qc, q) of
 -- Graphics code.
 blockSideLength : Float
 blockSideLength = 100
+halfLength = blockSideLength / 2
 
-backStackX = blockSideLength
-frontStackX  = -blockSideLength
+backStackX = blockSideLength * 0.75
+frontStackX  = -backStackX
 
 heightAt n = toFloat n * blockSideLength
 
 drawBlock x =
-  group [filled blue (square blockSideLength), toForm (Text.centered (Text.fromString (toString x)))]
+  let sty = {defaultLine | join <- Smooth, width <- 10} in
+  group
+  [ outlined  sty (square blockSideLength)
+  , traced sty (segment (-halfLength, -halfLength) (halfLength, halfLength))
+  , traced sty (segment (halfLength, -halfLength) (-halfLength, halfLength))
+  ]
 
 drawStack : List a -> Form
 drawStack xs =
@@ -160,7 +168,7 @@ drawPutting (PuttingRight x ((_, back) as q)) =
       h t        = dropHeight - (t/20)^2
       dur        = 20 * sqrt (dropHeight - hitHeight)
   in
-  Stage.for dur (\t -> drawBlock x |> move (backStackX, h t))
+  Stage.for dur (\t -> group [drawBlock x |> move (backStackX, h t), qDrawing])
 
 drawPopping : PoppingState a -> Stage ForATime Form
 drawPopping ps = case ps of
@@ -188,7 +196,7 @@ drawPoppingLeft v ((front, _) as q) =
       qDrawing = drawQueue q
       dur      = 0.6 * second
   in
-  Stage.map (\x -> group [qDrawing, drawBlock v] |> move (x, y))
+  Stage.map (\x -> group [qDrawing, drawBlock v |> move (x, y)])
     (Stage.for dur (ease easeInQuart float frontStackX -1000 dur))
 
 -- tying it all together
@@ -198,7 +206,7 @@ commandChan = Signal.channel NoOp
 buttons : Element
 buttons =
   flow right
-  [ button (Signal.send commandChan (Put 1)) "Put"
+  [ button (Signal.send commandChan (Put "x")) "Put"
   , button (Signal.send commandChan Pop) "Pop"
   ]
 
@@ -207,6 +215,6 @@ main =
   Signal.foldp (\qc (_, q) -> interpretCommand qc q) (Stage.stayForever (drawQueue empty), empty)
     (Signal.subscribe commandChan)
   |> Signal.map fst
-  |> (\ss -> Stage.run ss (Time.every 30))
-  |> Signal.map (\f -> collage 500 500 [f])
+  |> (\ss -> Stage.run ss (Time.every 20))
+  |> Signal.map (\f -> flow down [collage 500 500 [moveY -190 f], container 500 40 middle <| buttons])
 
