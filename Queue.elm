@@ -4,10 +4,20 @@ module Queue where
 -- (http://www.cs.cmu.edu/~rwh/theses/okasaki.pdf) along with types
 -- reifying operations on those queues.
 
-import PSignal (..)
-import Regex (..)
+import Easing(..)
+import Time (second)
+import Time
+import Stage
+import Stage(Stage, ForATime, Forever)
+import Stage.Infix(..)
 import Maybe
-import String (toInt)
+import List
+import Color(..)
+import Graphics.Collage(..)
+import Graphics.Element(..)
+import Graphics.Input (..)
+import Text
+import Signal
 
 -- In our quest to achieve good performance, we represent queues as a pair
 -- of lists: the first representing the front of the queue, and the second
@@ -18,7 +28,10 @@ import String (toInt)
 -- 2. Pushing an element onto the back of the queue is just consing onto the
 --    second list in the pair, since we're representing the back of the queue
 --    in reverse.
-type Queue a = ([a], [a])
+type alias Queue a = (List a, List a)
+
+empty : Queue a
+empty = ([], [])
 
 put : a -> Queue a -> Queue a
 put x (xs, ys) = (xs, x::ys)
@@ -27,7 +40,7 @@ pop : Queue a -> Maybe (a, Queue a)
 pop q = 
   case q of
     ([], [])    -> Nothing
-    ([], ys)    -> pop (reverse ys, [])
+    ([], ys)    -> pop (List.reverse ys, [])
     (x::xs, ys) -> Just (x, (xs, ys))
 
 -- If the front view of the queue is empty when we try to pop, we reverse the back
@@ -50,9 +63,10 @@ pop q =
 -- Q: How do we represent this input from the user.
 -- A: We make a type reifying the possible commands the user can make
 
-data QueueCommand a
+type QueueCommand a
   = Put a
   | Pop
+  | NoOp
 
 -- and then we build a signal of type `Signal (QueueCommand a)`, which represents the stream
 -- of queue commands. This signal is actually defined in the Main module, so we'll shelve
@@ -67,155 +81,132 @@ data QueueCommand a
 -- So, with that in mind, we define the following type, which more directly represents the
 -- exact operations being performed on a queue.
 
-data QueueOp a
-  = PutRight a
-  | PopLeft a
-  | RightToLeft a
-  | EmptyError
-  | Nop
+type PuttingState a = PuttingRight a (Queue a)
 
--- The idea now will be to somehow interpret our `Signal (QueueCommand a)` into
--- a `Signal (QueueOp a, Queue a)` (or something along those lines)
--- which can be more easily animated.
+type PoppingState a
+  = PoppingLeft a (Queue a)
+  | RightToLeft a (Queue a)
 
-rightToLeft : Queue a -> [(QueueOp a, Queue a)]
-rightToLeft q =
-  case q of
-    (xs, [])    -> execPop (xs, [])
-    (xs, y::ys) -> let q' = (y::xs,ys) in (RightToLeft y, q') :: rightToLeft q'
+type QueueState a
+  = Putting (PuttingState a)
+  | Popping (PoppingState a)
 
-execPop : Queue a -> [(QueueOp a, Queue a)]
-execPop q =
-  case q of
-    ([], [])    -> [(EmptyError, q)]
-    (x::xs, ys) -> [(PopLeft x, (xs, ys))]
-    _           -> rightToLeft q
+type OrDone x a = Done (Queue x) | StillGoing a
 
-execPut : a -> Queue a -> [(QueueOp a, Queue a)]
-execPut x (xs, ys) = [(PutRight x, (xs, x::ys))]
+stepPopping : PoppingState a -> OrDone a (PoppingState a)
+stepPopping ps = case ps of
+  PoppingLeft x q             -> Done q
+  RightToLeft x (front, back) -> case back of
+    []        -> Done (x :: front, back)
+    y::front' -> StillGoing (RightToLeft y (x :: front', back))
 
--- Right queue in the output is the queue before the operation
-interp : Queue a -> Signal (QueueCommand a) -> Signal ([(QueueOp a, Queue a)], Queue a)
-interp q0 commandSig =
-  let exec command (ss, _) = let q = snd (last ss) in
-    case command of
-      Put x -> (execPut x q, q)
-      Pop   -> (execPop q, q)
-  in
-  foldp exec ([(Nop, q0)], q0) commandSig
+stepPutting : PuttingState a -> OrDone a (PuttingState a)
+stepPutting (PuttingRight x (front, back)) = Done (front, x :: back)
 
-type Point = { x : Float, y : Float }
+record : (s -> OrDone a s) -> s -> (List s, Queue a)
+record step s = case step s of
+  Done q        -> ([s], q)
+  StillGoing s' -> let (ss, q) = record step s' in (s' :: ss, q)
 
-type QueueGraphic a =
-  { stacks     : (StackGraphic a, StackGraphic a)
-  , looseBlock : Maybe (BlockGraphic a)
-  }
+animatedSteps
+  :  (s -> OrDone a s)
+  -> (s -> Stage ForATime Form)
+  -> (s -> (Stage Forever Form, Queue a))
+animatedSteps step drawStep s =
+  let (ss, q) = record step s in
+  ( List.foldr1 (<>) (List.map drawStep ss) <> Stage.stayForever (drawQueue q)
+  , q)
 
-type StackGraphic a = [a]
-
-type BlockGraphic a = { pos : Point, block : a }
+interpretCommand : QueueCommand a -> Queue a -> (Stage Forever Form, Queue a)
+interpretCommand qc q = case (qc, q) of
+  (Pop, (x::front, back)) -> animatedSteps stepPopping drawPopping (PoppingLeft x (front, back))
+  (Pop, ([], x::back))    -> animatedSteps stepPopping drawPopping (RightToLeft x ([], back))
+  (Put x, _)              -> animatedSteps stepPutting drawPutting (PuttingRight x q)
+  (Pop, ([], []))         -> (Stage.stayForever (drawQueue q), q)
+  (NoOp, _)               -> (Stage.stayForever (drawQueue q), q)
 
 -- Graphics code.
 blockSideLength : Float
 blockSideLength = 100
 
-stackBlock : a -> Int -> Form
-stackBlock x n =
-  let sq = group [filled blue (square blockSideLength), toForm (centered (toText (show x)))]
-  in moveY (toFloat n * blockSideLength) sq
+backStackX = blockSideLength
+frontStackX  = -blockSideLength
 
-stackForm : StackGraphic a -> Form
-stackForm bs =
-  let len = length bs
-  in group (indexedMap (\i x -> stackBlock x (len - 1 - i)) bs)
+heightAt n = toFloat n * blockSideLength
 
-looseBlockForm : BlockGraphic a -> Form
-looseBlockForm {pos, block} = move (pos.x, pos.y) (stackBlock block 0)
+drawBlock x =
+  group [filled blue (square blockSideLength), toForm (Text.centered (Text.fromString (toString x)))]
 
-stackShift = 130
+drawStack : List a -> Form
+drawStack xs =
+  let n = List.length xs in
+  group <|
+  List.indexedMap (\i x ->
+    drawBlock x |> moveY  (toFloat (n - 1 - i) * blockSideLength))
+    xs
 
-queueForm : QueueGraphic a -> Form
-queueForm { stacks, looseBlock } =
-  let (l, r) = stacks
-      bform  = case looseBlock of { Nothing -> []; Just b -> [looseBlockForm b] }
+drawQueue : Queue a -> Form
+drawQueue (front, back) = 
+  group
+  [ drawStack front |> moveX frontStackX
+  , drawStack back  |> moveX backStackX
+  ]
+
+drawPutting : PuttingState a -> Stage ForATime Form
+drawPutting (PuttingRight x ((_, back) as q)) =
+  let qDrawing   = drawQueue q
+      dropHeight = 1000
+      hitHeight  = blockSideLength * toFloat (List.length back)
+      h t        = dropHeight - (t/20)^2
+      dur        = 20 * sqrt (dropHeight - hitHeight)
   in
-  group <| [stackForm l, moveX stackShift (stackForm r)] ++ bform
+  Stage.for dur (\t -> drawBlock x |> move (backStackX, h t))
 
-blockFallTime = 700 * millisecond
+drawPopping : PoppingState a -> Stage ForATime Form
+drawPopping ps = case ps of
+  RightToLeft x q -> drawRightToLeft x q
+  PoppingLeft x q -> drawPoppingLeft x q
 
-linearly : Time -> Float -> Float -> (Time -> Float)
-linearly dur start stop = \t -> if t >= dur then stop else start + (stop - start) * (t / dur)
-
-blocksHeight : Int -> Float
-blocksHeight n = toFloat n * blockSideLength
-
-newBlockPos : Int -> Time -> Point
-newBlockPos stackHeight = 
-  let yFinal   = blocksHeight stackHeight
-      yInitial = 1000
+drawRightToLeft : a -> Queue a -> Stage ForATime Form
+drawRightToLeft x ((front, back) as q) =
+  let dur         = 0.5 * second
+      qDrawing    = drawQueue q
+      backHeight  = heightAt (List.length back)
+      frontHeight = heightAt (List.length front)
+      up          = Stage.for dur <| ease easeInOutQuad float backHeight frontHeight dur
+      left        = Stage.for dur <| ease easeInOutQuad float backStackX frontStackX dur
+      pos         = 
+        if backHeight > frontHeight
+        then Stage.map (\x -> (x, backHeight)) left <> Stage.map (\y -> (frontStackX, y)) up
+        else Stage.map (\y -> (backStackX, y)) up <> Stage.map (\x -> (x, frontHeight)) left
   in
-  (\y -> {x = stackShift, y = y}) << (linearly blockFallTime yInitial yFinal)
+  Stage.map (\p -> group [qDrawing, move p (drawBlock x)]) pos
 
--- The arg should be the queue before the put
--- Duration: 2 seconds
-putRightAnim : a -> Queue a -> PSignal (QueueGraphic a)
-putRightAnim x q =
-  let blockPos = newBlockPos (length (snd q))
-  in for blockFallTime (\t -> {stacks = q, looseBlock = Just {pos = blockPos t, block = x}})
-
--- The arg should be the queue after the pop
--- Duration: 2 seconds
-popLeftAnim : a -> Queue a -> PSignal (QueueGraphic a)
-popLeftAnim x q =
-  let blockFlyTime = 700 * millisecond
-      blockY = blocksHeight (length (fst q))
-      blockPos = (\x -> {x = x, y = blockY}) << linearly blockFlyTime 0 (-500)
+drawPoppingLeft : a -> Queue a -> Stage ForATime Form
+drawPoppingLeft v ((front, _) as q) =
+  let y        = heightAt (List.length front)
+      qDrawing = drawQueue q
+      dur      = 0.6 * second
   in
-  for blockFlyTime (\t -> {stacks = q, looseBlock = Just {pos = blockPos t, block = x}})
+  Stage.map (\x -> group [qDrawing, drawBlock v] |> move (x, y))
+    (Stage.for dur (ease easeInQuart float frontStackX -1000 dur))
 
--- TODO: Perhaps these functions should be given the queue and modify it
--- as it should. I.e., exec and make the animation at the same time.
--- The arg should be the queue with the moving block on neither half.
--- Duration: 2 seconds
-rightToLeftAnim : a -> Queue a -> PSignal (QueueGraphic a)
-rightToLeftAnim x (l, r) =
-  let (n_l, n_r) = (length l, length r)
-      (h_l, h_r) = (blocksHeight n_l, blocksHeight n_r)
-      blockPos   = runPSignal (
-        if n_l > n_r
-        then upBlockPos h_r h_l stackShift >>> leftBlockPos stackShift 0 h_l
-        else leftBlockPos stackShift h_l h_r >>> upBlockPos h_r h_l 0)
-  in
-  for (1 * second) (\t -> {stacks = (l, r), looseBlock = Just {pos = blockPos t, block = x}})
+-- tying it all together
+commandChan : Signal.Channel (QueueCommand a)
+commandChan = Signal.channel NoOp
 
-upBlockPos   y0 yFinal x = for (0.5 * second) <| (\y -> {x=x, y=y}) << linearly (0.5 * second) y0 yFinal
-leftBlockPos x0 xFinal y = for (0.5 * second) <| (\x -> {x=x, y=y}) << linearly (0.5 * second) x0 xFinal
+buttons : Element
+buttons =
+  flow right
+  [ button (Signal.send commandChan (Put 1)) "Put"
+  , button (Signal.send commandChan Pop) "Pop"
+  ]
 
-animate : Signal ([(QueueOp a, Queue a)], Queue a) -> Signal (PSignal (QueueGraphic a))
-animate =
-  let toPSignal q (op, q') =
-    case op of
-      PutRight x    -> putRightAnim x q
-      PopLeft x     -> popLeftAnim x q'
-      RightToLeft x -> let (_::l,r) = q' in rightToLeftAnim x (l, r)
-      Nop           -> forever (\_ -> { stacks = q', looseBlock = Nothing })
-      EmptyError    -> forever (\_ -> { stacks = q', looseBlock = Nothing })
-  in
-  lift (\(ops, q) -> concatPSignal (map (toPSignal q) ops))
-
-draw : Signal (PSignal (QueueGraphic a)) -> Signal Form
-draw s =
-  lift2 (\(t0, psig) t -> queueForm <| runPSignal psig (t - t0)) (timestamp s) (every (30 * millisecond))
-
--- TODO: Currently unused
-parseCommand : String -> Maybe (QueueCommand Int)
-parseCommand =
-  let re = regex "push\\((\\d+)\\)|pop" in
-  \s ->
-    case find All re s of
-      []   -> Nothing
-      m :: _ -> 
-        case m.submatches of
-          [Nothing]     -> Just Pop
-          (Just x :: _) -> Maybe.map Put (toInt x)
+main : Signal Element
+main =
+  Signal.foldp (\qc (_, q) -> interpretCommand qc q) (Stage.stayForever (drawQueue empty), empty)
+    (Signal.subscribe commandChan)
+  |> Signal.map fst
+  |> (\ss -> Stage.run ss (Time.every 30))
+  |> Signal.map (\f -> collage 500 500 [f])
 
