@@ -71,8 +71,7 @@ type QueueCommand a
   | NoOp
 
 -- and then we build a signal of type `Signal (QueueCommand a)`, which represents the stream
--- of queue commands. This signal is actually defined in the Main module, so we'll shelve
--- discussion of getting the input for later. For now, let's just suppose we have such a signal.
+-- of queue commands. For now, let's just suppose we have such a signal.
 
 -- The `QueueCommand`s themselves aren't directly animatable. The `Pop` command in particular
 -- could have many different animations associated to it depending on the state of the queue:
@@ -81,7 +80,7 @@ type QueueCommand a
 -- animated differently.
 
 -- So, with that in mind, we define the following type, which more directly represents the
--- exact operations being performed on a queue.
+-- state of our system (the queue) as our two operations (Pop and Put) are performed on it. 
 
 type PuttingState a = PuttingRight a (Queue a)
 
@@ -89,9 +88,9 @@ type PoppingState a
   = PoppingLeft a (Queue a)
   | RightToLeft a (Queue a)
 
-type QueueState a
-  = Putting (PuttingState a)
-  | Popping (PoppingState a)
+-- Note that if we have a value of type `PoppingState a`, we can always either take a step in the
+-- popping algorithm (shuffle the next element from the back queue to the front queue) or finish.
+-- With that in mind, we define
 
 type OrDone x a = Done (Queue x) | StillGoing a
 
@@ -102,23 +101,31 @@ stepPopping ps = case ps of
     []       -> StillGoing (PoppingLeft x (front, back))
     y::back' -> StillGoing (RightToLeft y (x :: front, back'))
 
+-- Similarly, we can define `stepPutting`.
+
 stepPutting : PuttingState a -> OrDone a (PuttingState a)
 stepPutting (PuttingRight x (front, back)) = Done (front, x :: back)
 
+-- Now a function which builds up the history of the intermediate states in performing some opertation,
+-- as well as returning the queue in its post-operation state.
 record : (s -> OrDone a s) -> s -> (List s, Queue a)
 record step s = case step s of
   Done q        -> ([s], q)
   StillGoing s' -> let (ss, q) = record step s' in (s :: ss, q)
 
+-- Throwing in a function which animates one step, we get a general description of how to animate an
+-- an operation on a queue, by stringing together the animations of the intermediate steps.
 animatedSteps
   :  (s -> OrDone a s)
   -> (s -> Stage ForATime Form)
   -> (s -> (Stage Forever Form, Queue a))
-animatedSteps step drawStep s =
+animatedSteps step animateStep s =
   let (ss, q) = Debug.watch "record" <| record step s in
-  ( List.foldr1 (<>) (List.map drawStep ss) <> Stage.stayForever (drawQueue q)
+  ( List.foldr1 (<>) (List.map animateStep ss) <> Stage.stayForever (drawQueue q)
   , q)
 
+-- Now we put it all together in a function that "executes" commands on a queue
+-- to get a new queue and an animation of the execution.
 interpretCommand : QueueCommand a -> Queue a -> (Stage Forever Form, Queue a)
 interpretCommand qc q = case (qc, q) of
   (Pop, (x::front, back)) -> animatedSteps stepPopping drawPopping (PoppingLeft x (front, back))
@@ -126,6 +133,14 @@ interpretCommand qc q = case (qc, q) of
   (Put x, _)              -> animatedSteps stepPutting drawPutting (PuttingRight x q)
   (Pop, ([], []))         -> (Stage.stayForever (drawQueue q), q)
   (NoOp, _)               -> (Stage.stayForever (drawQueue q), q)
+
+main : Signal Element
+main =
+  Signal.foldp (\qc (_, q) -> interpretCommand qc q) (Stage.stayForever (drawQueue empty), empty)
+    (Signal.subscribe commandChan)
+  |> Signal.map fst
+  |> (\ss -> Stage.run ss (Time.every 20))
+  |> Signal.map (\f -> flow down [collage 500 500 [moveY -190 f], container 500 40 middle <| buttons])
 
 -- Graphics code.
 blockSideLength : Float
@@ -209,12 +224,3 @@ buttons =
   [ button (Signal.send commandChan (Put "x")) "Put"
   , button (Signal.send commandChan Pop) "Pop"
   ]
-
-main : Signal Element
-main =
-  Signal.foldp (\qc (_, q) -> interpretCommand qc q) (Stage.stayForever (drawQueue empty), empty)
-    (Signal.subscribe commandChan)
-  |> Signal.map fst
-  |> (\ss -> Stage.run ss (Time.every 20))
-  |> Signal.map (\f -> flow down [collage 500 500 [moveY -190 f], container 500 40 middle <| buttons])
-
