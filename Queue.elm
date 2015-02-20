@@ -88,6 +88,30 @@ type PoppingState a
   = PoppingLeft a (Queue a)
   | RightToLeft a (Queue a)
 
+type Execution a
+  = Popping (List (PoppingState a))
+  | Putting (List (PuttingState a))
+  | NoOpping (Queue a)
+
+first : (a -> a') -> (a, b) -> (a', b)
+first f (x, y) = (f x, y)
+
+interpretCommand : QueueCommand a -> Queue a -> (Execution a, Queue a)
+interpretCommand qc = case qc of
+  Put x -> \q -> first Putting <| record stepPutting (PuttingRight x q)
+  Pop   -> \q -> case q of
+    ([], [])         -> (NoOpping q, q)
+    ([], x::back)    -> first Popping <| record stepPopping (RightToLeft x ([], back))
+    (x::front, back) -> first Popping <| record stepPopping (PoppingLeft x (front, back))
+
+interpretExecution : Execution a -> Stage Forever Form
+interpretExecution =
+  let animWith anim = Stage.sustain << List.foldr1 (<>) << List.map anim in
+  \e -> case e of
+    Popping pss -> animWith drawPopping pss
+    Putting pss -> animWith drawPutting pss
+    NoOpping q  -> Stage.stayForever (drawQueue q)
+
 -- Note that if we have a value of type `PoppingState a`, we can always either take a step in the
 -- popping algorithm (shuffle the next element from the back queue to the front queue) or finish.
 -- With that in mind, we define
@@ -126,17 +150,10 @@ animatedSteps step animateStep s =
 
 -- Now we put it all together in a function that "executes" commands on a queue
 -- to get a new queue and an animation of the execution.
-interpretCommand : QueueCommand a -> Queue a -> (Stage Forever Form, Queue a)
-interpretCommand qc q = case (qc, q) of
-  (Pop, (x::front, back)) -> animatedSteps stepPopping drawPopping (PoppingLeft x (front, back))
-  (Pop, ([], x::back))    -> animatedSteps stepPopping drawPopping (RightToLeft x ([], back))
-  (Put x, _)              -> animatedSteps stepPutting drawPutting (PuttingRight x q)
-  (Pop, ([], []))         -> (Stage.stayForever (drawQueue q), q)
-  (NoOp, _)               -> (Stage.stayForever (drawQueue q), q)
 
 main : Signal Element
 main =
-  Signal.foldp (\qc (_, q) -> interpretCommand qc q) (Stage.stayForever (drawQueue empty), empty)
+  Signal.foldp (\qc (_, q) -> first interpretExecution <| interpretCommand qc q) (Stage.stayForever (drawQueue empty), empty)
     (Signal.subscribe commandChan)
   |> Signal.map fst
   |> (\ss -> Stage.run ss (Time.every 20))
